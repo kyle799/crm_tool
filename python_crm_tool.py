@@ -36,6 +36,12 @@ import requests
 
 MAX_PAGE_SIZE = 500
 NAME_COLUMN_WIDTH = 52
+STATUS_COLUMN_WIDTH = 9
+CONTACT_COLUMN_WIDTH = 7
+LOCATION_COLUMN_WIDTH = 18
+TYPE_COLUMN_WIDTH = 6
+AGE_COLUMN_WIDTH = 3
+ID_COLUMN_WIDTH = 11
 
 ANSI_RESET = "\033[0m"
 ANSI_GREEN = "\033[32m"
@@ -359,6 +365,45 @@ def _format_age(form_date: str) -> str:
     return f"{int(age_days / 365.25)}y"
 
 
+def _pad_text(text: str, width: int) -> str:
+    if len(text) >= width:
+        return text[:width]
+    return text.ljust(width)
+
+
+def _format_location(city: str, state: str) -> str:
+    if city == "-" and state == "-":
+        return "-"
+    if state == "-":
+        return city
+    return f"{city}, {state}"
+
+
+def _format_entity_header() -> str:
+    columns = [
+        _pad_text("NAME", NAME_COLUMN_WIDTH),
+        _pad_text("STATUS", STATUS_COLUMN_WIDTH),
+        _pad_text("CONTACT", CONTACT_COLUMN_WIDTH),
+        _pad_text("LOCATION", LOCATION_COLUMN_WIDTH),
+        _pad_text("TYPE", TYPE_COLUMN_WIDTH),
+        _pad_text("AGE", AGE_COLUMN_WIDTH),
+        _pad_text("ENTITY ID", ID_COLUMN_WIDTH),
+    ]
+    header = "  ".join(columns)
+    divider = "  ".join(
+        [
+            "-" * NAME_COLUMN_WIDTH,
+            "-" * STATUS_COLUMN_WIDTH,
+            "-" * CONTACT_COLUMN_WIDTH,
+            "-" * LOCATION_COLUMN_WIDTH,
+            "-" * TYPE_COLUMN_WIDTH,
+            "-" * AGE_COLUMN_WIDTH,
+            "-" * ID_COLUMN_WIDTH,
+        ]
+    )
+    return f"{header}\n{divider}"
+
+
 def _format_entity_row(entity: Dict[str, Any], *, use_color: bool) -> str:
     name = _truncate_text(_first_present(entity, "entityname", "name"), NAME_COLUMN_WIDTH)
     entity_id = _first_present(entity, "entityid", "id")
@@ -368,18 +413,19 @@ def _format_entity_row(entity: Dict[str, Any], *, use_color: bool) -> str:
     state = _first_present(entity, "principalstate", "state")
     entity_type = _first_present(entity, "entitytype", "type", "entity_type")
     age = _format_age(_first_present(entity, "entityformdate"))
+    location = _truncate_text(_format_location(city, state), LOCATION_COLUMN_WIDTH)
 
-    status_text = _apply_color(status_label.ljust(9), status_color, enabled=use_color)
-    contact_text = _apply_color(contact_label.ljust(7), contact_color, enabled=use_color)
+    status_text = _apply_color(_pad_text(status_label, STATUS_COLUMN_WIDTH), status_color, enabled=use_color)
+    contact_text = _apply_color(_pad_text(contact_label, CONTACT_COLUMN_WIDTH), contact_color, enabled=use_color)
 
     return (
         f"{name}  "
         f"{status_text}  "
         f"{contact_text}  "
-        f"{city}, {state:<2}  "
-        f"{entity_type:<6}  "
-        f"{age:>3}  "
-        f"{entity_id}"
+        f"{location}  "
+        f"{_pad_text(entity_type, TYPE_COLUMN_WIDTH)}  "
+        f"{age.rjust(AGE_COLUMN_WIDTH)}  "
+        f"{_pad_text(entity_id, ID_COLUMN_WIDTH)}"
     )
 
 
@@ -401,6 +447,7 @@ def format_pretty(result: Any) -> str:
             return "\n".join(lines)
 
         lines.append("results:")
+        lines.append(_format_entity_header())
         lines.extend(_format_entity_row(entity, use_color=use_color) for entity in entities)
         return "\n".join(lines)
 
