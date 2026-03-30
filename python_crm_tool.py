@@ -292,6 +292,61 @@ def filter_active_companies(result: Any) -> Any:
     return updated
 
 
+def _first_present(entity: Dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = entity.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return "-"
+
+
+def _format_entity_summary(entity: Dict[str, Any]) -> str:
+    name = _first_present(entity, "entityname", "name")
+    entity_id = _first_present(entity, "entityid", "id")
+    status = _first_present(entity, "entitystatus", "status")
+    entity_type = _first_present(entity, "entitytype", "type", "entity_type")
+    city = _first_present(entity, "principalcity", "city")
+    state = _first_present(entity, "principalstate", "state")
+    contacted = _first_present(entity, "contacted")
+    return (
+        f"- {name}\n"
+        f"  id: {entity_id}\n"
+        f"  status: {status}\n"
+        f"  type: {entity_type}\n"
+        f"  location: {city}, {state}\n"
+        f"  contacted: {contacted}"
+    )
+
+
+def format_pretty(result: Any) -> str:
+    extracted = _extract_entity_list(result)
+    if extracted is not None:
+        _, entities = extracted
+        lines = [
+            f"count: {len(entities)}",
+        ]
+        if isinstance(result, dict):
+            for key in ("total", "limit", "offset", "filtered_count"):
+                if key in result:
+                    lines.append(f"{key}: {result[key]}")
+
+        if not entities:
+            lines.append("results: none")
+            return "\n".join(lines)
+
+        lines.append("results:")
+        lines.extend(_format_entity_summary(entity) for entity in entities)
+        return "\n".join(lines)
+
+    if isinstance(result, dict):
+        return "\n".join(f"{key}: {json.dumps(value, sort_keys=True)}" for key, value in sorted(result.items()))
+
+    return json.dumps(result, indent=2, sort_keys=True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="CLI client for the entities API")
     parser.add_argument(
@@ -309,6 +364,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=30,
         help="HTTP timeout in seconds (default: 30)",
+    )
+    parser.add_argument(
+        "--pretty-format",
+        action="store_true",
+        help="Render output in a readable text format instead of JSON",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -415,7 +475,10 @@ def main() -> None:
         parser.error(f"Unknown command: {args.command}")
         return
 
-    print(json.dumps(result, indent=2, sort_keys=True))
+    if args.pretty_format:
+        print(format_pretty(result))
+    else:
+        print(json.dumps(result, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
