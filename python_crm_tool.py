@@ -153,7 +153,7 @@ class APIClient:
             remaining -= page_limit
             current_offset += page_limit
 
-        return merged_result
+        return _normalize_result_metadata(merged_result, limit=limit, offset=offset)
 
     def get_entity(self, entity_id: str) -> Any:
         return self._request("GET", f"/api/v1/entities/{entity_id}")
@@ -204,6 +204,17 @@ def _get_entities_from_result(result: Any) -> list[Dict[str, Any]]:
     return entities
 
 
+def _normalize_result_metadata(result: Any, *, limit: int, offset: int) -> Any:
+    if not isinstance(result, dict):
+        return result
+
+    normalized = dict(result)
+    normalized["limit"] = limit
+    normalized["offset"] = offset
+    normalized["returned_count"] = len(_get_entities_from_result(result))
+    return normalized
+
+
 def merge_paginated_results(existing: Any, new_result: Any) -> Any:
     if existing is None:
         return new_result
@@ -237,16 +248,29 @@ def merge_paginated_results(existing: Any, new_result: Any) -> Any:
 
 def _is_company(entity: Dict[str, Any]) -> bool:
     company_markers = {"company", "business", "organization", "org"}
-    for key in ("type", "entity_type", "kind", "category", "record_type"):
+    company_type_suffixes = ("LLC", "INC", "CORP", "CORPORATION", "LP", "LLP", "LLLP", "PC")
+
+    for key in ("entitytype", "type", "entity_type", "kind", "category", "record_type"):
         value = entity.get(key)
-        if isinstance(value, str) and value.strip().lower() in company_markers:
+        if not isinstance(value, str):
+            continue
+
+        normalized = value.strip().upper()
+        if normalized.lower() in company_markers:
             return True
+        if normalized.endswith(company_type_suffixes):
+            return True
+
     return False
 
 
 def _is_active(entity: Dict[str, Any]) -> bool:
-    status = entity.get("status")
-    return isinstance(status, str) and status.strip().lower() == "active"
+    active_statuses = {"GOOD STANDING", "EXISTS"}
+    for key in ("entitystatus", "status"):
+        value = entity.get(key)
+        if isinstance(value, str) and value.strip().upper() in active_statuses:
+            return True
+    return False
 
 
 def filter_active_companies(result: Any) -> Any:
@@ -263,6 +287,8 @@ def filter_active_companies(result: Any) -> Any:
     updated = dict(result)
     updated[list_key] = filtered
     updated["filtered_count"] = len(filtered)
+    if "returned_count" in updated:
+        updated["returned_count"] = len(filtered)
     return updated
 
 
