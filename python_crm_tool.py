@@ -24,6 +24,8 @@ Notes:
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import json
 import os
 import sys
@@ -33,6 +35,14 @@ import requests
 
 
 MAX_PAGE_SIZE = 500
+NAME_COLUMN_WIDTH = 52
+
+ANSI_RESET = "\033[0m"
+ANSI_GREEN = "\033[32m"
+ANSI_YELLOW = "\033[33m"
+ANSI_RED = "\033[31m"
+ANSI_CYAN = "\033[36m"
+ANSI_DIM = "\033[2m"
 
 
 class APIClient:
@@ -303,25 +313,78 @@ def _first_present(entity: Dict[str, Any], *keys: str) -> str:
     return "-"
 
 
-def _format_entity_summary(entity: Dict[str, Any]) -> str:
-    name = _first_present(entity, "entityname", "name")
+def _truncate_text(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text.ljust(width)
+    return f"{text[: width - 1].rstrip()}…"
+
+
+def _apply_color(text: str, color: str, *, enabled: bool) -> str:
+    if not enabled:
+        return text
+    return f"{color}{text}{ANSI_RESET}"
+
+
+def _normalize_status(status: str) -> tuple[str, str]:
+    normalized = status.strip().upper()
+    if normalized in {"GOOD STANDING", "EXISTS"}:
+        return "GOOD", ANSI_GREEN
+    if normalized in {"DELINQUENT", "NONCOMPLIANT"}:
+        return "DELINQ", ANSI_YELLOW
+    if any(marker in normalized for marker in ("DISSOLVED", "WITHDRAWN", "RELINQUISHED")):
+        return "DISSOLVED", ANSI_RED
+    return normalized[:10], ANSI_CYAN
+
+
+def _format_contacted(contacted: Any) -> tuple[str, str]:
+    if contacted is True:
+        return "REACHED", ANSI_GREEN
+    if contacted is False:
+        return "NEW", ANSI_DIM
+    return "-", ANSI_CYAN
+
+
+def _format_age(form_date: str) -> str:
+    try:
+        dt = parsedate_to_datetime(form_date)
+    except (TypeError, ValueError, IndexError):
+        return "-"
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    age_days = (datetime.now(timezone.utc) - dt).days
+    if age_days < 0:
+        return "0y"
+    return f"{int(age_days / 365.25)}y"
+
+
+def _format_entity_row(entity: Dict[str, Any], *, use_color: bool) -> str:
+    name = _truncate_text(_first_present(entity, "entityname", "name"), NAME_COLUMN_WIDTH)
     entity_id = _first_present(entity, "entityid", "id")
-    status = _first_present(entity, "entitystatus", "status")
-    entity_type = _first_present(entity, "entitytype", "type", "entity_type")
+    status_label, status_color = _normalize_status(_first_present(entity, "entitystatus", "status"))
+    contact_label, contact_color = _format_contacted(entity.get("contacted"))
     city = _first_present(entity, "principalcity", "city")
     state = _first_present(entity, "principalstate", "state")
-    contacted = _first_present(entity, "contacted")
+    entity_type = _first_present(entity, "entitytype", "type", "entity_type")
+    age = _format_age(_first_present(entity, "entityformdate"))
+
+    status_text = _apply_color(status_label.ljust(9), status_color, enabled=use_color)
+    contact_text = _apply_color(contact_label.ljust(7), contact_color, enabled=use_color)
+
     return (
-        f"- {name}\n"
-        f"  id: {entity_id}\n"
-        f"  status: {status}\n"
-        f"  type: {entity_type}\n"
-        f"  location: {city}, {state}\n"
-        f"  contacted: {contacted}"
+        f"{name}  "
+        f"{status_text}  "
+        f"{contact_text}  "
+        f"{city}, {state:<2}  "
+        f"{entity_type:<6}  "
+        f"{age:>3}  "
+        f"{entity_id}"
     )
 
 
 def format_pretty(result: Any) -> str:
+    use_color = sys.stdout.isatty()
     extracted = _extract_entity_list(result)
     if extracted is not None:
         _, entities = extracted
@@ -338,7 +401,7 @@ def format_pretty(result: Any) -> str:
             return "\n".join(lines)
 
         lines.append("results:")
-        lines.extend(_format_entity_summary(entity) for entity in entities)
+        lines.extend(_format_entity_row(entity, use_color=use_color) for entity in entities)
         return "\n".join(lines)
 
     if isinstance(result, dict):
