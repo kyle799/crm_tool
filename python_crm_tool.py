@@ -183,6 +183,12 @@ class APIClient:
     def delete_entity(self, entity_id: str) -> Any:
         return self._request("DELETE", f"/api/v1/entities/{entity_id}")
 
+    def export_entities(self) -> Any:
+        return self._request("GET", "/api/v1/entities/export")
+
+    def import_entities(self, data: Any) -> Any:
+        return self._request("POST", "/api/v1/entities/import", json_body=data)
+
 
 def parse_json_arg(raw: str) -> Dict[str, Any]:
     try:
@@ -527,6 +533,20 @@ def build_parser() -> argparse.ArgumentParser:
     delete_parser = subparsers.add_parser("delete", help="DELETE /api/v1/entities/<id>")
     delete_parser.add_argument("id", help="Entity ID")
 
+    export_parser = subparsers.add_parser("export", help="GET /api/v1/entities/export — download all entities")
+    export_parser.add_argument(
+        "--out",
+        metavar="FILE",
+        help="Write output to FILE instead of stdout",
+    )
+
+    import_parser = subparsers.add_parser("import", help="POST /api/v1/entities/import — bulk upsert from export file")
+    import_parser.add_argument(
+        "file",
+        metavar="FILE",
+        help="Path to a JSON export file produced by the export command",
+    )
+
     return parser
 
 
@@ -580,6 +600,24 @@ def main() -> None:
 
     elif args.command == "delete":
         result = client.delete_entity(args.id)
+
+    elif args.command == "export":
+        result = client.export_entities()
+        if args.out:
+            with open(args.out, "w") as fh:
+                json.dump(result, fh, indent=2, sort_keys=True)
+            print(f"Exported to {args.out}", file=sys.stderr)
+            return
+        # fall through to normal output below
+
+    elif args.command == "import":
+        try:
+            with open(args.file) as fh:
+                payload = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"Error reading {args.file}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        result = client.import_entities(payload)
 
     else:
         parser.error(f"Unknown command: {args.command}")
