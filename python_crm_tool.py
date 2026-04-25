@@ -24,7 +24,7 @@ Notes:
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import json
 import os
@@ -189,6 +189,37 @@ class APIClient:
     def import_entities(self, data: Any) -> Any:
         return self._request("POST", "/api/v1/entities/import", json_body=data)
 
+    # --- enrichment write endpoints (added by Phase 2) ---
+
+    def create_signal(self, entity_id: str, data: Dict[str, Any]) -> Any:
+        return self._request("POST", f"/api/v1/entities/{entity_id}/signals", json_body=data)
+
+    def create_trigger(self, entity_id: str, data: Dict[str, Any]) -> Any:
+        return self._request("POST", f"/api/v1/entities/{entity_id}/triggers", json_body=data)
+
+    def create_enrichment_run(self, entity_id: str, data: Dict[str, Any]) -> Any:
+        return self._request(
+            "POST",
+            f"/api/v1/entities/{entity_id}/enrichment-runs",
+            json_body=data,
+        )
+
+    def update_enrichment_run(self, run_id: int, data: Dict[str, Any]) -> Any:
+        return self._request("PATCH", f"/api/v1/enrichment-runs/{run_id}", json_body=data)
+
+    def list_enrichment_runs(self, entity_id: str, limit: int = 50) -> Any:
+        return self._request(
+            "GET",
+            f"/api/v1/entities/{entity_id}/enrichment-runs",
+            params={"limit": limit},
+        )
+
+    def create_contact(self, entity_id: str, data: Dict[str, Any]) -> Any:
+        return self._request("POST", f"/api/v1/entities/{entity_id}/contacts", json_body=data)
+
+    def create_location(self, entity_id: str, data: Dict[str, Any]) -> Any:
+        return self._request("POST", f"/api/v1/entities/{entity_id}/locations", json_body=data)
+
 
 def parse_json_arg(raw: str) -> Dict[str, Any]:
     try:
@@ -312,6 +343,100 @@ def filter_active_companies(result: Any) -> Any:
     if "returned_count" in updated:
         updated["returned_count"] = len(filtered)
     return updated
+
+
+def _has_value(entity: Dict[str, Any], field: str) -> bool:
+    value = entity.get(field)
+    if value is None:
+        return False
+    if isinstance(value, str) and not value.strip():
+        return False
+    return True
+
+
+def _parse_run_started_at(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _was_recently_enriched(
+    client: "APIClient",
+    entity_id: str,
+    *,
+    source_name: str,
+    cutoff: datetime,
+) -> bool:
+    runs = client.list_enrichment_runs(entity_id, limit=20)
+    rows = runs.get("data") if isinstance(runs, dict) else runs
+    if not isinstance(rows, list):
+        return False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("source_name") != source_name:
+            continue
+        if row.get("status") != "ok":
+            continue
+        started_at = _parse_run_started_at(row.get("started_at"))
+        if started_at is not None and started_at >= cutoff:
+            return True
+    return False
+
+
+def list_needing_enrichment(
+    client: "APIClient",
+    *,
+    field: str,
+    max_age_days: int,
+    source_name: str,
+    limit: int,
+    scan: int,
+) -> Any:
+    """Find entities that still need enrichment for a given field.
+
+    Two-step, client-side: the colorado-biz API does not currently expose a
+    'field IS NULL' filter, so we scan up to `scan` entities and filter
+    locally. When `max_age_days > 0`, we additionally drop entities that
+    have a successful enrichment_runs row from `source_name` within that
+    window — this is N+1 (one extra GET per candidate), so it's opt-in.
+    """
+    raw = client.list_entities(limit=scan)
+    extracted = _extract_entity_list(raw)
+    if extracted is None:
+        return raw
+
+    list_key, entities = extracted
+    candidates = [e for e in entities if not _has_value(e, field)]
+
+    if max_age_days > 0:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        candidates = [
+            e
+            for e in candidates
+            if e.get("entityid")
+            and not _was_recently_enriched(
+                client, e["entityid"], source_name=source_name, cutoff=cutoff
+            )
+        ]
+
+    truncated = candidates[:limit]
+
+    if list_key is None:
+        return truncated
+
+    return {
+        list_key: truncated,
+        "scanned": len(entities),
+        "filtered_count": len(candidates),
+        "returned_count": len(truncated),
+        "limit": limit,
+        "field": field,
+        "max_age_days": max_age_days,
+    }
 
 
 def _first_present(entity: Dict[str, Any], *keys: str) -> str:
@@ -547,6 +672,132 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a JSON export file produced by the export command",
     )
 
+    # --- enrichment write commands ---
+
+    signals_parser = subparsers.add_parser("signals", help="Signal write commands")
+    signals_sub = signals_parser.add_subparsers(dest="signals_command", required=True)
+    sig_create = signals_sub.add_parser(
+        "create", help="POST /api/v1/entities/<id>/signals"
+    )
+    sig_create.add_argument("entity_id")
+    sig_create.add_argument(
+        "--data",
+        required=True,
+        type=parse_json_arg,
+        help='JSON object, e.g. \'{"signal_type":"web_presence","confidence_score":85}\'',
+    )
+
+    triggers_parser = subparsers.add_parser("triggers", help="Trigger write commands")
+    triggers_sub = triggers_parser.add_subparsers(dest="triggers_command", required=True)
+    trg_create = triggers_sub.add_parser(
+        "create", help="POST /api/v1/entities/<id>/triggers"
+    )
+    trg_create.add_argument("entity_id")
+    trg_create.add_argument(
+        "--data",
+        required=True,
+        type=parse_json_arg,
+        help='JSON object, e.g. \'{"trigger_type":"review_spike","intensity_score":80}\'',
+    )
+
+    runs_parser = subparsers.add_parser(
+        "enrichment-runs", help="Enrichment run write commands"
+    )
+    runs_sub = runs_parser.add_subparsers(dest="runs_command", required=True)
+    run_create = runs_sub.add_parser(
+        "create", help="POST /api/v1/entities/<id>/enrichment-runs"
+    )
+    run_create.add_argument("entity_id")
+    run_create.add_argument(
+        "--data",
+        required=True,
+        type=parse_json_arg,
+        help='JSON object, e.g. \'{"source_name":"enricher","status":"in_progress"}\'',
+    )
+    run_finish = runs_sub.add_parser(
+        "finish",
+        help="PATCH /api/v1/enrichment-runs/<id> with a terminal status",
+    )
+    run_finish.add_argument("run_id", type=int)
+    run_finish.add_argument(
+        "--status",
+        required=True,
+        choices=["ok", "error", "skipped"],
+        help="Terminal status",
+    )
+    run_finish.add_argument(
+        "--signals-created",
+        type=int,
+        help="Number of signals emitted during the run",
+    )
+    run_finish.add_argument(
+        "--error-message",
+        help="Optional error message (use with --status error)",
+    )
+
+    contacts_parser = subparsers.add_parser("contacts", help="Contact write commands")
+    contacts_sub = contacts_parser.add_subparsers(dest="contacts_command", required=True)
+    con_create = contacts_sub.add_parser(
+        "create", help="POST /api/v1/entities/<id>/contacts"
+    )
+    con_create.add_argument("entity_id")
+    con_create.add_argument(
+        "--data",
+        required=True,
+        type=parse_json_arg,
+        help='JSON object, e.g. \'{"full_name":"Jane Doe","email":"j@acme.com"}\'',
+    )
+
+    locations_parser = subparsers.add_parser("locations", help="Location write commands")
+    locations_sub = locations_parser.add_subparsers(dest="locations_command", required=True)
+    loc_create = locations_sub.add_parser(
+        "create", help="POST /api/v1/entities/<id>/locations"
+    )
+    loc_create.add_argument("entity_id")
+    loc_create.add_argument(
+        "--data",
+        required=True,
+        type=parse_json_arg,
+        help='JSON object, e.g. \'{"address1":"123 Main","city":"Denver","state":"CO"}\'',
+    )
+
+    needing = subparsers.add_parser(
+        "list-needing-enrichment",
+        help="List entities lacking a field — feeds the enricher's selector",
+    )
+    needing.add_argument(
+        "--field",
+        default="foundwebsite",
+        help="Entity field that must be empty/null (default: foundwebsite)",
+    )
+    needing.add_argument(
+        "--max-age-days",
+        type=int,
+        default=0,
+        help=(
+            "Skip entities with a successful enrichment_runs row from "
+            "--source-name within this window. Default 0 disables the check "
+            "(saves N+1 GETs)."
+        ),
+    )
+    needing.add_argument(
+        "--source-name",
+        default="enricher",
+        help="enrichment_runs.source_name to match for staleness (default: enricher)",
+    )
+    needing.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Maximum candidates to return (default: 50)",
+    )
+    needing.add_argument(
+        "--scan",
+        type=int,
+        default=500,
+        help="How many entities to scan before filtering (default: 500)",
+    )
+
     return parser
 
 
@@ -618,6 +869,58 @@ def main() -> None:
             print(f"Error reading {args.file}: {exc}", file=sys.stderr)
             sys.exit(1)
         result = client.import_entities(payload)
+
+    elif args.command == "signals":
+        if args.signals_command == "create":
+            result = client.create_signal(args.entity_id, args.data)
+        else:
+            parser.error(f"Unknown signals subcommand: {args.signals_command}")
+            return
+
+    elif args.command == "triggers":
+        if args.triggers_command == "create":
+            result = client.create_trigger(args.entity_id, args.data)
+        else:
+            parser.error(f"Unknown triggers subcommand: {args.triggers_command}")
+            return
+
+    elif args.command == "enrichment-runs":
+        if args.runs_command == "create":
+            result = client.create_enrichment_run(args.entity_id, args.data)
+        elif args.runs_command == "finish":
+            payload: Dict[str, Any] = {"status": args.status}
+            if args.signals_created is not None:
+                payload["signals_created"] = args.signals_created
+            if args.error_message is not None:
+                payload["error_message"] = args.error_message
+            result = client.update_enrichment_run(args.run_id, payload)
+        else:
+            parser.error(f"Unknown enrichment-runs subcommand: {args.runs_command}")
+            return
+
+    elif args.command == "contacts":
+        if args.contacts_command == "create":
+            result = client.create_contact(args.entity_id, args.data)
+        else:
+            parser.error(f"Unknown contacts subcommand: {args.contacts_command}")
+            return
+
+    elif args.command == "locations":
+        if args.locations_command == "create":
+            result = client.create_location(args.entity_id, args.data)
+        else:
+            parser.error(f"Unknown locations subcommand: {args.locations_command}")
+            return
+
+    elif args.command == "list-needing-enrichment":
+        result = list_needing_enrichment(
+            client,
+            field=args.field,
+            max_age_days=args.max_age_days,
+            source_name=args.source_name,
+            limit=args.limit,
+            scan=args.scan,
+        )
 
     else:
         parser.error(f"Unknown command: {args.command}")
